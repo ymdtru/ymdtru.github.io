@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>野兽先辈画像变形工坊</title>
+<title>野兽先辈画像変形工坊</title>
 <style>
 *{box-sizing:border-box}
 body{margin:0;padding:20px;font-family:system-ui,"Yu Gothic UI",sans-serif;color:#222;background:#fff}
@@ -35,13 +35,53 @@ input[type=range]{width:130px;min-width:90px;accent-color:#526d2b;touch-action:p
 @media(hover:none){
  button{min-height:44px}
 }
+
+/* モーダル共通：フェード＋軽いスケールアニメーション */
+.modal-overlay{
+  position:fixed;inset:0;z-index:1000;
+  display:flex;align-items:center;justify-content:center;padding:16px;
+  background:rgba(0,0,0,.35);
+  opacity:0;
+  visibility:hidden;
+  pointer-events:none;
+  transition:opacity .22s ease, visibility .22s ease;
+}
+.modal-overlay.open{
+  opacity:1;
+  visibility:visible;
+  pointer-events:auto;
+}
+.modal{
+  background:#fff;border:1px solid #ccc;border-radius:6px;padding:18px 20px;
+  width:min(360px,100%);box-shadow:0 8px 28px rgba(0,0,0,.18);
+  font-family:inherit;color:#222;
+  opacity:0;
+  transform:scale(.96) translateY(10px);
+  transition:opacity .22s ease, transform .22s ease;
+}
+.modal-overlay.open .modal{
+  opacity:1;
+  transform:scale(1) translateY(0);
+}
+.modal h2{margin:0 0 14px;font-size:17px;font-weight:600}
+.modal p{margin:0 0 16px;font-size:14px;line-height:1.5;color:#444;white-space:pre-line}
+.modal-actions{display:flex;flex-direction:column;gap:8px}
+.modal-actions button{width:100%;text-align:left;padding:10px 12px}
+.modal-drop{
+  margin-top:12px;border:2px dashed #bbb;border-radius:6px;padding:22px 12px;
+  text-align:center;color:#666;font-size:13px;background:#fafafa;
+  transition:border-color .15s,background .15s;
+}
+.modal-drop.dragover{border-color:#9aaf70;background:#f0f6e8;color:#333}
+.modal-close{margin-top:14px;width:100%}
+.modal-message .modal-close{margin-top:0}
 </style>
 </head>
 <body>
 <main>
-  <h1>野兽先辈画像变形工坊</h1>
+  <h1>野兽先辈画像変形工坊</h1>
   <section>
-    <div class="wrap"><canvas id="canvas"></canvas></div>
+    <div class="wrap" id="dropzone"><canvas id="canvas"></canvas></div>
     <div class="controls">
       <button class="primary" id="load">画像を読み込む</button>
       <input class="file-input" id="file" type="file" accept="image/*">
@@ -54,13 +94,44 @@ input[type=range]{width:130px;min-width:90px;accent-color:#526d2b;touch-action:p
     </div>
   </section>
 </main>
+
+<!-- 読み込み方法選択ウィンドウ -->
+<div class="modal-overlay" id="loadModal" role="dialog" aria-modal="true" aria-labelledby="loadModalTitle">
+  <div class="modal">
+    <h2 id="loadModalTitle">画像の読み込み方法</h2>
+    <div class="modal-actions">
+      <button type="button" id="modalFile">ファイルを選択…</button>
+      <button type="button" id="modalPaste">クリップボードから貼り付け</button>
+    </div>
+    <div class="modal-drop" id="modalDrop">
+      ここに画像をドラッグ＆ドロップ
+    </div>
+    <button type="button" class="modal-close" id="modalClose">閉じる</button>
+  </div>
+</div>
+
+<!-- メッセージ通知ウィンドウ -->
+<div class="modal-overlay modal-message" id="messageModal" role="dialog" aria-modal="true" aria-labelledby="messageModalTitle">
+  <div class="modal">
+    <h2 id="messageModalTitle">エラー</h2>
+    <p id="messageModalBody"></p>
+    <button type="button" class="modal-close" id="messageModalClose">閉じる</button>
+  </div>
+</div>
+
 <script>
 (() => {
  const canvas=document.getElementById('canvas'),ctx=canvas.getContext('2d');
  const status=document.getElementById('status'),img=new Image();
  const fileInput=document.getElementById('file');
+ const dropzone=document.getElementById('dropzone');
+ const loadModal=document.getElementById('loadModal');
+ const modalDrop=document.getElementById('modalDrop');
+ const messageModal=document.getElementById('messageModal');
+ const messageModalBody=document.getElementById('messageModalBody');
  let currentObjectUrl=null;
  let sourceFileName='yaju.png';
+ let pendingCloseOnLoad=false; // 読み込み成功時に読み込みウィンドウを閉じるかどうか
  const COLS=48,ROWS=48;
  let width=640,height=480,base=[],points=[],drag=null,animating=false,animationFrame=0;
  let radius=115,power=1,history=[];
@@ -68,6 +139,55 @@ input[type=range]{width:130px;min-width:90px;accent-color:#526d2b;touch-action:p
  const sourceCanvas=document.createElement('canvas');
  const sourceCtx=sourceCanvas.getContext('2d');
  const idx=(x,y)=>y*(COLS+1)+x;
+
+ function revokeCurrentUrl(){
+  if(currentObjectUrl){URL.revokeObjectURL(currentObjectUrl);currentObjectUrl=null;}
+ }
+
+ function showMessage(text){
+  messageModalBody.textContent=text;
+  // 次フレームで open を付けてトランジションを確実に発火させる
+  messageModal.classList.remove('open');
+  requestAnimationFrame(()=>{
+   requestAnimationFrame(()=>{
+    messageModal.classList.add('open');
+   });
+  });
+ }
+
+ function closeMessageModal(){
+  messageModal.classList.remove('open');
+ }
+
+ function loadFromFile(file){
+  if(!file||!file.type.startsWith('image/')){
+   status.textContent='画像ファイルを選択してください';
+   showMessage('選択されたファイルは画像ではありません。画像ファイルを選んでください。');
+   return false;
+  }
+  revokeCurrentUrl();
+  currentObjectUrl=URL.createObjectURL(file);
+  sourceFileName=file.name||'image.png';
+  status.textContent='画像を読み込み中…';
+  pendingCloseOnLoad=true;
+  img.src=currentObjectUrl;
+  return true;
+ }
+
+ function loadFromBlob(blob,name){
+  if(!blob||!(blob.type||'').startsWith('image/')){
+   status.textContent='画像データを取得できませんでした';
+   return false;
+  }
+  revokeCurrentUrl();
+  currentObjectUrl=URL.createObjectURL(blob);
+  sourceFileName=name||'pasted.png';
+  status.textContent='画像を読み込み中…';
+  pendingCloseOnLoad=true;
+  img.src=currentObjectUrl;
+  return true;
+ }
+
  function init(){
   // 画面に収まるサイズに縮小（アスペクト比維持）
   const scale=Math.min(1,800/img.naturalWidth,640/img.naturalHeight);
@@ -84,8 +204,15 @@ input[type=range]{width:130px;min-width:90px;accent-color:#526d2b;touch-action:p
   for(let y=0;y<=ROWS;y++)for(let x=0;x<=COLS;x++){
    const p={x:x/COLS*width,y:y/ROWS*height};base.push({...p});points.push({...p});
   }
-  updateButtons();draw();status.textContent=`${img.naturalWidth} × ${img.naturalHeight}`;
+  updateButtons();draw();
+  status.textContent=`${img.naturalWidth} × ${img.naturalHeight}`;
+  // 読み込み成功時のみウィンドウを閉じる
+  if(pendingCloseOnLoad){
+   pendingCloseOnLoad=false;
+   closeLoadModal();
+  }
  }
+
  // 三角形境界のサブピクセル隙間を埋めるため、クリップ領域をわずかに外側へ広げる。
  // キャンバス座標系で固定量（約1.5px）広げると、表示倍率やブラウザ差に左右されにくい。
  function triangle(sa,sb,sc,da,db,dc){
@@ -117,6 +244,7 @@ input[type=range]{width:130px;min-width:90px;accent-color:#526d2b;touch-action:p
   ctx.drawImage(sourceCanvas,0,0);
   ctx.restore();
  }
+
  function draw(){
   ctx.clearRect(0,0,width,height);
   // アンチエイリアスによる境界の薄れを軽減するためスムージングを有効化
@@ -128,10 +256,12 @@ input[type=range]{width:130px;min-width:90px;accent-color:#526d2b;touch-action:p
    triangle(base[a],base[d],base[c],points[a],points[d],points[c]);
   }
  }
+
  function pointer(e){const r=canvas.getBoundingClientRect();return{x:(e.clientX-r.left)*width/r.width,y:(e.clientY-r.top)*height/r.height}}
  function nearest(p){let bi=0,bd=Infinity;for(let i=0;i<points.length;i++){const dx=points[i].x-p.x,dy=points[i].y-p.y,d=dx*dx+dy*dy;if(d<bd){bd=d;bi=i}}return{index:bi,dist:bd}}
  function snapshot(){history.push(points.map(p=>({x:p.x,y:p.y})));if(history.length>30)history.shift();updateButtons()}
  function updateButtons(){document.getElementById('undo').disabled=history.length===0||animating}
+
  // ばねのように少し行き過ぎてから、ぷるんと目標形状へ収束する
  function animateTo(target,duration=720){
   cancelAnimationFrame(animationFrame);drag=null;animating=true;updateButtons();
@@ -150,6 +280,7 @@ input[type=range]{width:130px;min-width:90px;accent-color:#526d2b;touch-action:p
   }
   animationFrame=requestAnimationFrame(frame);
  }
+
  canvas.addEventListener('pointerdown',e=>{
   if(!img.naturalWidth||animating)return;const p=pointer(e),n=nearest(p);
   if(n.dist>Math.pow(Math.max(45,radius*.8),2))return;
@@ -165,10 +296,12 @@ input[type=range]{width:130px;min-width:90px;accent-color:#526d2b;touch-action:p
  });
  function release(){drag=null}
  canvas.addEventListener('pointerup',release);canvas.addEventListener('pointercancel',release);
+
  document.getElementById('reset').addEventListener('click',()=>{if(!base.length||animating)return;snapshot();animateTo(base);});
  document.getElementById('undo').addEventListener('click',()=>{if(animating)return;const prev=history.pop();if(!prev)return;updateButtons();animateTo(prev);});
  document.getElementById('radius').addEventListener('input',e=>radius=Number(e.target.value));
  document.getElementById('power').addEventListener('input',e=>power=Number(e.target.value)/100);
+
  document.getElementById('save').addEventListener('click',async()=>{
   if(!img.naturalWidth)return;
 
@@ -177,7 +310,7 @@ input[type=range]{width:130px;min-width:90px;accent-color:#526d2b;touch-action:p
   if(enteredName===null)return;
 
   const originalBase=sourceFileName.replace(/\.[^.]*$/,'')||'image';
-  let filename=enteredName.trim()||`${originalBase} -yaju`;
+  let filename=(enteredName.trim()||`${originalBase} -yaju`);
   filename=filename.replace(/\.png$/i,'')+'.png';
 
   const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));
@@ -191,20 +324,151 @@ input[type=range]{width:130px;min-width:90px;accent-color:#526d2b;touch-action:p
   setTimeout(()=>URL.revokeObjectURL(url),3000);
   status.textContent='ダウンロードを開始しました';
  });
+
  img.onload=init;
- img.onerror=()=>{canvas.width=640;canvas.height=360;ctx.clearRect(0,0,640,360);ctx.fillStyle='#fff';ctx.font='17px sans-serif';ctx.textAlign='center';ctx.fillText('画像を読み込んでください',320,180);status.textContent='画像が見つかりません（画像を読み込んでください）'};
- document.getElementById('load').addEventListener('click',()=>fileInput.click());
+ img.onerror=()=>{
+  pendingCloseOnLoad=false;
+  canvas.width=640;canvas.height=360;
+  ctx.clearRect(0,0,640,360);
+  ctx.fillStyle='#fff';
+  ctx.font='17px sans-serif';
+  ctx.textAlign='center';
+  ctx.fillText('画像を読み込んでください',320,180);
+  status.textContent='画像が見つかりません（画像を読み込んでください）';
+  // 読み込み失敗時はウィンドウを閉じない
+ };
+
+ // ===== 読み込み選択ウィンドウ =====
+ function openLoadModal(){
+  loadModal.classList.remove('open');
+  requestAnimationFrame(()=>{
+   requestAnimationFrame(()=>{
+    loadModal.classList.add('open');
+   });
+  });
+ }
+ function closeLoadModal(){
+  loadModal.classList.remove('open');
+  modalDrop.classList.remove('dragover');
+ }
+
+ document.getElementById('load').addEventListener('click',openLoadModal);
+ document.getElementById('modalClose').addEventListener('click',closeLoadModal);
+ loadModal.addEventListener('click',e=>{if(e.target===loadModal)closeLoadModal();});
+
+ document.getElementById('messageModalClose').addEventListener('click',closeMessageModal);
+ messageModal.addEventListener('click',e=>{if(e.target===messageModal)closeMessageModal();});
+
+ // ファイル選択：ウィンドウは閉じず、読み込み成功時に閉じる
+ document.getElementById('modalFile').addEventListener('click',()=>{
+  fileInput.click();
+ });
+
+ // クリップボードから貼り付け
+ document.getElementById('modalPaste').addEventListener('click',async()=>{
+  try{
+   if(navigator.clipboard&&navigator.clipboard.read){
+    const items=await navigator.clipboard.read();
+    let found=false;
+    for(const item of items){
+     const type=item.types.find(t=>t.startsWith('image/'));
+     if(type){
+      const blob=await item.getType(type);
+      if(loadFromBlob(blob,'pasted.png')){
+       found=true;
+      }
+      break;
+     }
+    }
+    if(!found){
+     showMessage('クリップボードに画像がありません。\n画像をコピーしてから再度お試しください。');
+    }
+   }else{
+    showMessage('このブラウザではクリップボードからの直接読み取りに対応していません。\nCtrl+V（または Cmd+V）で貼り付けてください。');
+   }
+  }catch(err){
+   // 権限拒否やその他エラー
+   const msg=String(err&&err.name||'')==='NotAllowedError'
+     ?'クリップボードへのアクセスが拒否されました。\nブラウザの設定で許可するか、Ctrl+V（または Cmd+V）で貼り付けてください。'
+     :'クリップボードの読み取りに失敗しました。\nCtrl+V（または Cmd+V）で貼り付けてください。';
+   showMessage(msg);
+  }
+ });
+
+ // モーダル内ドロップ：成功時のみ閉じる
+ ;['dragenter','dragover'].forEach(ev=>{
+  modalDrop.addEventListener(ev,e=>{
+   e.preventDefault();e.stopPropagation();
+   modalDrop.classList.add('dragover');
+  });
+ });
+ ;['dragleave','drop'].forEach(ev=>{
+  modalDrop.addEventListener(ev,e=>{
+   e.preventDefault();e.stopPropagation();
+   if(ev==='dragleave')modalDrop.classList.remove('dragover');
+  });
+ });
+ modalDrop.addEventListener('drop',e=>{
+  modalDrop.classList.remove('dragover');
+  const file=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];
+  if(file){
+   loadFromFile(file);
+  }else{
+   showMessage('ドロップされたデータに画像ファイルが含まれていません。');
+  }
+ });
+
+ // ファイル選択
  fileInput.addEventListener('change',()=>{
   const file=fileInput.files&&fileInput.files[0];
-  if(!file)return;
-  if(!file.type.startsWith('image/')){status.textContent='画像ファイルを選択してください';fileInput.value='';return;}
-  if(currentObjectUrl)URL.revokeObjectURL(currentObjectUrl);
-  currentObjectUrl=URL.createObjectURL(file);
-  sourceFileName=file.name;
-  status.textContent='画像を読み込み中…';
-  img.src=currentObjectUrl;
+  if(!file){
+   // キャンセル時はウィンドウを開いたまま
+   return;
+  }
+  loadFromFile(file);
   fileInput.value='';
  });
+
+ // ===== ページ全体でのペースト =====
+ document.addEventListener('paste',e=>{
+  const items=(e.clipboardData&&e.clipboardData.items)||[];
+  for(const item of items){
+   if(item.type&&item.type.startsWith('image/')){
+    e.preventDefault();
+    const blob=item.getAsFile();
+    if(blob){
+     // ページ全体の貼り付けでも、モーダルが開いていれば成功時に閉じる
+     pendingCloseOnLoad=loadModal.classList.contains('open');
+     loadFromBlob(blob,'pasted.png');
+    }
+    return;
+   }
+  }
+ });
+
+ // ===== メイン領域でのドラッグ＆ドロップ =====
+ ;['dragenter','dragover'].forEach(ev=>{
+  dropzone.addEventListener(ev,e=>{
+   e.preventDefault();e.stopPropagation();
+   dropzone.style.outline='2px dashed #9aaf70';
+  });
+ });
+ ;['dragleave','drop'].forEach(ev=>{
+  dropzone.addEventListener(ev,e=>{
+   e.preventDefault();e.stopPropagation();
+   dropzone.style.outline='';
+  });
+ });
+ dropzone.addEventListener('drop',e=>{
+  const file=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];
+  if(file){
+   // メイン領域ドロップ時はモーダルが開いていれば成功時に閉じる
+   pendingCloseOnLoad=loadModal.classList.contains('open');
+   loadFromFile(file);
+  }
+ });
+
+ // 初期画像
  img.src='/img/yju/yaju.png';
 })();
 </script>
